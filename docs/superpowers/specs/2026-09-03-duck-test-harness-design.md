@@ -19,7 +19,7 @@ Each rung must report what was actually checked. A failed or unavailable check r
 ### In scope for the first implementation
 
 1. A pinned upstream manifest identifying the exact `microduck_rl` repository and revision used by `duck`.
-2. A machine diagnostic command that checks required local capabilities without changing the machine.
+2. A machine diagnostic command that checks required local capabilities without installing, fetching, configuring, or changing system/dependency/checkout state. Its sole permitted local mutation is the append-only diagnostic receipt required by this design under `.duck/receipts/`.
 3. A setup command that fetches the pinned upstream source and installs only the dependencies required for the selected rung.
 4. CPU-safe unit/config smoke tests where upstream supports them.
 5. A local simulation test that launches the MicroDuck model or policy inference when its prerequisites are present.
@@ -56,7 +56,7 @@ Changing the pin is an explicit repository change and must run the compatibility
 
 The repository exposes one small front door, implemented with ordinary shell/Python rather than a custom daemon:
 
-- `./duck doctor` — read-only capability inspection.
+- `./duck doctor` — capability inspection whose probes are read-only; the command persists only its required append-only diagnostic receipt under `.duck/receipts/`.
 - `./duck setup [cpu|gpu]` — prepare the requested rung.
 - `./duck test unit` — run the cheapest upstream tests known to be CPU-safe.
 - `./duck test smoke` — configuration/environment smoke checks.
@@ -115,7 +115,7 @@ Each rung states prerequisites, exact command, expected PASS witness, common fai
 
 The harness fails early on mismatched upstream revisions, missing required executables, or incompatible Python/runtime prerequisites.
 
-Setup may create an isolated project environment only inside `.duck/` or the disposable upstream checkout. The exact environment mechanism and path are implementation inputs to be selected only after verifying the pinned upstream tooling. `doctor` remains read-only.
+Setup may create an isolated project environment only inside `.duck/` or the disposable upstream checkout. The exact environment mechanism and path are implementation inputs to be selected only after verifying the pinned upstream tooling. `doctor` performs no installation, fetch, checkout, configuration, or external-state mutation; its sole local write is the append-only receipt required under `.duck/receipts/`.
 
 Commands must print the failed precondition and the smallest next command that can resolve or further discriminate the failure.
 
@@ -139,7 +139,7 @@ GitHub Actions initially runs only tests 1-4 when their prerequisites are verifi
 
 The first implementation is accepted when all of the following are true:
 
-- A fresh host meeting the implementation-documented prerequisites can clone `duck`, run `./duck doctor`, and receive an unambiguous capability report without mutation.
+- A fresh host meeting the implementation-documented prerequisites can clone `duck`, run `./duck doctor`, and receive an unambiguous capability report without installation, dependency, checkout, configuration, or external-state mutation; the required append-only receipt under `.duck/receipts/` is the only permitted local write.
 - `./duck setup cpu` produces a pinned upstream checkout and isolated environment, or fails with a specific prerequisite witness.
 - `./duck test unit` and `./duck test smoke` execute real checks and emit receipts.
 - On a host satisfying the documented simulation prerequisites, `./duck test sim` proves that a MicroDuck simulation process starts and advances.
