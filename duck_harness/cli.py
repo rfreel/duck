@@ -17,6 +17,8 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="duck", description="Guided MicroDuck test harness")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("doctor", help="inspect prerequisites without installing or fetching")
+    setup = sub.add_parser("setup", help="prepare pinned upstream environment")
+    setup.add_argument("mode", choices=("cpu", "gpu"))
     return parser
 
 
@@ -28,6 +30,8 @@ def main(argv: Sequence[str] | None = None, *, root: Path | None = None) -> int:
     started_at = utc_now(); host = probes.host_snapshot()
     if args.command == "doctor":
         outcome = commands.doctor(paths, config); command = ["doctor"]
+    elif args.command == "setup":
+        outcome = commands.setup(paths, config, args.mode); command = ["setup", args.mode]
     else:
         raise AssertionError(args.command)
     ended_at = utc_now()
