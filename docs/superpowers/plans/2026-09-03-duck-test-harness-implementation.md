@@ -59,33 +59,13 @@ The following were established from current upstream source during planning:
 - Create: `tests/test_paths.py`
 
 **Interfaces:**
-
-```python
-class Status(str, Enum):
-    PASS = "PASS"
-    FAIL = "FAIL"
-    SKIP = "SKIP"
-    UNKNOWN = "UNKNOWN"
-
-@dataclass(frozen=True)
-class CheckResult:
-    name: str
-    status: Status
-    required: bool
-    detail: str
-    exit_code: int | None = None
-    evidence: dict[str, Any] = field(default_factory=dict)
-
-@dataclass(frozen=True)
-class CommandOutcome:
-    checks: tuple[CheckResult, ...]
-    upstream_revision: str | None = None
-    log_paths: tuple[Path, ...] = ()
-
-    @property
-    def overall_status(self) -> Status:
-        return aggregate_status(self.checks)
-```
+- `Status`: enum with `PASS`, `FAIL`, `SKIP`, `UNKNOWN`.
+- `CheckResult(name, status, required, detail, exit_code=None, evidence={})`.
+- `CommandOutcome(checks, upstream_revision=None, log_paths=())` with computed `overall_status`.
+- `aggregate_status(checks) -> Status`.
+- `UpstreamConfig(schema_version, repository, revision, reference_branch)`.
+- `load_upstream(path) -> UpstreamConfig`.
+- `HarnessPaths.from_root(root) -> HarnessPaths`.
 
 - [ ] **Step 1: Write failing tests**
 
@@ -151,18 +131,57 @@ testpaths = ["tests"]
 
 - [ ] **Step 3: Implement model/config/paths**
 
-`aggregate_status(checks)` uses this exact precedence:
+`duck_harness/model.py` uses these concrete data structures:
 
 ```python
-required = [check for check in checks if check.required]
-if any(check.status is Status.FAIL for check in required):
-    return Status.FAIL
-if any(check.status in (Status.UNKNOWN, Status.SKIP) for check in required):
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import Enum
+from pathlib import Path
+from typing import Any, Sequence
+
+
+class Status(str, Enum):
+    PASS = "PASS"
+    FAIL = "FAIL"
+    SKIP = "SKIP"
+    UNKNOWN = "UNKNOWN"
+
+
+@dataclass(frozen=True)
+class CheckResult:
+    name: str
+    status: Status
+    required: bool
+    detail: str
+    exit_code: int | None = None
+    evidence: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class CommandOutcome:
+    checks: tuple[CheckResult, ...]
+    upstream_revision: str | None = None
+    log_paths: tuple[Path, ...] = ()
+
+    @property
+    def overall_status(self) -> Status:
+        return aggregate_status(self.checks)
+
+
+def aggregate_status(checks: Sequence[CheckResult]) -> Status:
+    required = [check for check in checks if check.required]
+    if any(check.status is Status.FAIL for check in required):
+        return Status.FAIL
+    if any(check.status in (Status.UNKNOWN, Status.SKIP) for check in required):
+        return Status.UNKNOWN
+    if required and all(check.status is Status.PASS for check in required):
+        return Status.PASS
     return Status.UNKNOWN
-if required and all(check.status is Status.PASS for check in required):
-    return Status.PASS
-return Status.UNKNOWN
 ```
+
+`duck_harness/config.py` uses `_REQUIRED = {"schema_version", "repository", "revision", "reference_branch"}` and `_SHA_RE = re.compile(r"^[0-9a-f]{40}$")`; it rejects any key-set mismatch and validates every authority field explicitly.
 
 `HarnessPaths.from_root(root)` resolves:
 
@@ -191,44 +210,26 @@ git commit -m "feat: establish duck harness authority model"
 - Create: `tests/test_process.py`
 - Create: `tests/test_receipts.py`
 
-**Interfaces:**
-
-```python
-@dataclass(frozen=True)
-class ProcessResult:
-    argv: tuple[str, ...]
-    returncode: int
-    stdout_path: Path
-    stderr_path: Path
-
-def run_logged(argv: Sequence[str], *, cwd: Path, log_dir: Path, stem: str,
-               env: Mapping[str, str] | None = None) -> ProcessResult: ...
-
-def utc_now() -> str: ...
-def write_receipt(paths: HarnessPaths, command: Sequence[str], outcome: CommandOutcome,
-                  host: dict[str, Any], started_at: str, ended_at: str) -> Path: ...
-def read_receipts(paths: HarnessPaths) -> list[dict[str, Any]]: ...
-```
+**Callable contracts:**
+- `ProcessResult(argv, returncode, stdout_path, stderr_path)` is immutable.
+- `run_logged(argv, *, cwd, log_dir, stem, env=None) -> ProcessResult` executes one argument-array subprocess and captures both streams to files.
+- `utc_now() -> str` returns a UTC ISO-8601 timestamp ending in `Z`.
+- `write_receipt(paths, command, outcome, host, started_at, ended_at) -> Path` atomically publishes one receipt.
+- `read_receipts(paths) -> list[dict[str, Any]]` validates and returns receipts in filename order.
 
 - [ ] **Step 1: Write failing tests**
 
 `tests/test_process.py` runs `sys.executable -c` and proves stdout/stderr separation, exact nonzero exit-code propagation, log confinement, and no shell interpolation.
 
-`tests/test_receipts.py` proves:
-
-- PASS/FAIL/SKIP/UNKNOWN survive serialization exactly;
-- `upstream_revision` may be null before an observed checkout exists;
-- log paths are repository-relative POSIX strings;
-- two receipt writes create distinct files;
-- malformed JSON or missing required receipt fields raises `ValueError` naming the file.
+`tests/test_receipts.py` proves PASS/FAIL/SKIP/UNKNOWN survive serialization exactly; `upstream_revision` may be null before an observed checkout exists; log paths are repository-relative POSIX strings; two receipt writes create distinct files; malformed JSON or missing required fields raises `ValueError` naming the file.
 
 - [ ] **Step 2: Implement subprocess logging**
 
-Use `subprocess.run(list(argv), cwd=cwd, stdout=stdout_handle, stderr=stderr_handle, check=False, env=env)` and no shell. Create unique log filenames using a sanitized stem plus `time.time_ns()`.
+Use `subprocess.run(list(argv), cwd=cwd, stdout=stdout_handle, stderr=stderr_handle, check=False, env=env, shell=False)`. Create unique log filenames from a sanitized stem plus `time.time_ns()`.
 
 - [ ] **Step 3: Implement receipt schema and atomic write**
 
-Schema version `1` fields:
+Schema version `1` fields are exactly:
 
 ```text
 schema_version
@@ -265,17 +266,14 @@ git commit -m "feat: add execution logs and immutable receipts"
 - Create: `tests/test_probes.py`
 - Create: `tests/test_cli.py`
 
-**Interfaces:**
-
-```python
-def host_snapshot() -> dict[str, object]: ...
-def probe_host_target() -> CheckResult: ...
-def probe_executable(name: str, *, required: bool = True) -> CheckResult: ...
-def probe_python312(*, required: bool = True) -> CheckResult: ...
-def probe_nvidia(*, required: bool = False) -> CheckResult: ...
-def doctor(paths: HarnessPaths, config: UpstreamConfig) -> CommandOutcome: ...
-def main(argv: Sequence[str] | None = None) -> int: ...
-```
+**Callable contracts:**
+- `host_snapshot() -> dict[str, object]` records system, release, machine, controller Python version, and controller executable.
+- `probe_host_target() -> CheckResult` distinguishes Linux, WSL2, native Windows, macOS, and other systems.
+- `probe_executable(name, *, required=True) -> CheckResult` uses executable lookup without mutation.
+- `probe_python312(*, required=True) -> CheckResult` observes a usable Python 3.12 path.
+- `probe_nvidia(*, required=False) -> CheckResult` observes NVIDIA driver/GPU visibility.
+- `doctor(paths, config) -> CommandOutcome` runs only read-only probes.
+- `main(argv=None) -> int` parses, dispatches, persists one receipt, renders checks, and returns mapped exit status.
 
 - [ ] **Step 1: Write failing host/tool tests**
 
@@ -288,28 +286,11 @@ Cover four distinct host paths:
 | Windows | UNKNOWN | `native-windows` |
 | macOS | UNKNOWN | `macos` |
 
-Also cover missing `git` → FAIL, missing `uv` → FAIL, exact Python 3.12 found → PASS with path evidence, no Python 3.12 → FAIL, missing optional `nvidia-smi` → SKIP, and failing optional `nvidia-smi` invocation → UNKNOWN.
-
-Inject platform strings, executable lookup, and subprocess runner into probe helpers so tests are deterministic.
+Also cover missing `git` → FAIL, missing `uv` → FAIL, exact Python 3.12 found → PASS with path evidence, no Python 3.12 → FAIL, missing optional `nvidia-smi` → SKIP, and failing optional `nvidia-smi` invocation → UNKNOWN. Inject platform strings, executable lookup, and subprocess runner.
 
 - [ ] **Step 2: Implement probes without mutation**
 
-Python 3.12 candidates, in order:
-
-```text
-sys.executable
-python3.12
-python3
-python
-```
-
-For each unique existing executable run:
-
-```text
-EXE -c import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')
-```
-
-PASS only for output `3.12`.
+Python 3.12 candidates, in order: `sys.executable`, `python3.12`, `python3`, `python`. For each unique existing executable run one argv-array probe whose program is `import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')`. PASS only for output `3.12`.
 
 If `nvidia-smi` exists, run:
 
@@ -321,24 +302,11 @@ nvidia-smi --query-gpu=name,driver_version --format=csv,noheader
 
 Required doctor checks: host target, `git`, `uv`, Python 3.12. NVIDIA is optional.
 
-CLI sequence for a normal command:
+CLI command lifecycle: load authority; capture start/host; execute command; capture end; persist exactly one receipt; print `STATUS  check-name  detail`; print overall and receipt path.
 
-1. load root `upstream.json`;
-2. capture start time and host snapshot;
-3. run command implementation;
-4. capture end time;
-5. write exactly one receipt;
-6. print `STATUS  check-name  detail` lines plus overall status and receipt path.
+Exit code mapping: PASS `0`, FAIL `1`, UNKNOWN `2`.
 
-Exit code mapping for test/setup/doctor commands:
-
-```text
-PASS    -> 0
-FAIL    -> 1
-UNKNOWN -> 2
-```
-
-- [ ] **Step 4: Create executable `duck`**
+- [ ] **Step 4: Create executable front door**
 
 ```sh
 #!/usr/bin/env sh
@@ -363,7 +331,7 @@ python -m pytest tests/test_probes.py tests/test_cli.py -q
 ./duck doctor
 ```
 
-A local doctor may legitimately return FAIL/UNKNOWN when a prerequisite is absent. Verify that it creates a receipt but does not create `.duck/upstream/`.
+A local doctor may legitimately return FAIL/UNKNOWN when a prerequisite is absent. Verify it writes a receipt but does not create `.duck/upstream/`.
 
 ```bash
 git add duck duck_harness tests
@@ -380,29 +348,15 @@ git commit -m "feat: add read-only duck doctor"
 - Modify: `duck_harness/cli.py`
 - Create: `tests/test_upstream.py`
 
-**Interfaces:**
-
-```python
-def observe_checkout_revision(paths: HarnessPaths) -> CheckResult: ...
-def ensure_checkout(config: UpstreamConfig, paths: HarnessPaths,
-                    runner=run_logged) -> CommandOutcome: ...
-def verify_environment(paths: HarnessPaths) -> CheckResult: ...
-def setup(paths: HarnessPaths, config: UpstreamConfig, mode: str) -> CommandOutcome: ...
-```
+**Callable contracts:**
+- `observe_checkout_revision(paths) -> CheckResult` reports absent, mismatched, or exact checkout state without changing it.
+- `ensure_checkout(config, paths, runner=run_logged) -> CommandOutcome` creates or realigns only a clean derived checkout to the immutable SHA.
+- `verify_environment(paths) -> CheckResult` proves upstream `.venv/bin/python` is Python 3.12.
+- `setup(paths, config, mode) -> CommandOutcome` accepts only `cpu` or `gpu`, performs required probes, checkout preparation, frozen uv sync, and mode-specific GPU verification.
 
 - [ ] **Step 1: Write failing checkout/setup tests**
 
-Using a fake logged runner, cover:
-
-1. absent checkout creates clone/fetch/detached-checkout command sequence;
-2. exact observed SHA → PASS;
-3. other SHA → FAIL, regardless of branch name;
-4. dirty checkout → FAIL with no reset/checkout afterward;
-5. wrong origin URL → FAIL;
-6. failed host/git/uv/Python prerequisite prevents clone;
-7. `setup cpu` does not require NVIDIA;
-8. `setup gpu` requires NVIDIA and Torch CUDA visibility;
-9. failed `uv sync` preserves the numeric exit code.
+Using a fake logged runner, cover: absent checkout clone/fetch/detached-checkout sequence; exact SHA PASS; other SHA FAIL unless clean setup explicitly realigns it; dirty checkout FAIL with no reset; wrong origin FAIL; failed host/git/uv/Python prerequisite prevents clone; CPU mode does not require NVIDIA; GPU mode requires NVIDIA and Torch CUDA; failed uv sync preserves exit code.
 
 - [ ] **Step 2: Implement checkout operations**
 
@@ -421,7 +375,7 @@ git -C .duck/upstream/microduck_rl checkout --detach 29e887ecfbf5d37144759e5a9f8
 git -C .duck/upstream/microduck_rl rev-parse HEAD
 ```
 
-Existing checkout probes, before mutation:
+Existing checkout probes before mutation:
 
 ```text
 git -C .duck/upstream/microduck_rl status --porcelain
@@ -429,34 +383,28 @@ git -C .duck/upstream/microduck_rl remote get-url origin
 git -C .duck/upstream/microduck_rl rev-parse HEAD
 ```
 
-Non-empty status or wrong origin stops with FAIL. A clean wrong SHA may fetch and detach-checkout the immutable pin. Final PASS requires exact SHA equality.
+Non-empty status or wrong origin stops with FAIL. A clean wrong SHA may fetch and detached-checkout the pin. Final PASS requires exact equality.
 
 - [ ] **Step 3: Create upstream environment**
 
-Use the exact Python 3.12 path recorded by `probe_python312`:
+Pass the exact Python 3.12 path from `probe_python312` as one argv element:
 
 ```text
 uv sync --python OBSERVED_PYTHON_3_12_PATH --frozen
 ```
 
-The code passes the observed path as one argv element; it is not shell-expanded text.
+Environment readiness requires `.duck/upstream/microduck_rl/.venv/bin/python` to emit `3.12` for the same version probe used by doctor.
 
-Environment readiness requires `.duck/upstream/microduck_rl/.venv/bin/python` and exact output `3.12` from:
-
-```text
-.venv/bin/python -c import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')
-```
-
-For `setup gpu`, also require:
+GPU mode additionally requires:
 
 ```text
 nvidia-smi --query-gpu=name,driver_version --format=csv,noheader
 uv run --frozen python -c import torch; assert torch.cuda.is_available(); print(torch.cuda.get_device_name(0))
 ```
 
-- [ ] **Step 4: Add CLI commands and verify**
+- [ ] **Step 4: Add CLI and verify**
 
-Only these modes are accepted:
+Accepted commands are exactly:
 
 ```bash
 ./duck setup cpu
@@ -470,7 +418,7 @@ python -m pytest tests/test_upstream.py tests/test_cli.py -q
 ./duck setup cpu
 ```
 
-On a qualifying host, verify receipt `upstream_revision` and `git rev-parse HEAD` both equal the immutable pin.
+On a qualifying host, receipt `upstream_revision` and `git rev-parse HEAD` must equal the pin.
 
 - [ ] **Step 5: Commit**
 
@@ -488,14 +436,9 @@ git commit -m "feat: pin and prepare microduck upstream"
 - Modify: `duck_harness/cli.py`
 - Create: `tests/test_cpu_tiers.py`
 
-**Interfaces:**
-
-```python
-def test_unit(paths: HarnessPaths, config: UpstreamConfig,
-              runner=run_logged) -> CommandOutcome: ...
-def test_smoke(paths: HarnessPaths, config: UpstreamConfig,
-               runner=run_logged) -> CommandOutcome: ...
-```
+**Callable contracts:**
+- `test_unit(paths, config, runner=run_logged) -> CommandOutcome` runs only the two focused upstream guard files after readiness checks.
+- `test_smoke(paths, config, runner=run_logged) -> CommandOutcome` runs the complete documented upstream CPU test directory after readiness checks.
 
 - [ ] **Step 1: Write failing exact-argv tests**
 
@@ -511,32 +454,23 @@ Full CPU smoke argv:
 uv run --frozen --with pytest pytest -q tests/
 ```
 
-Both run with `cwd=.duck/upstream/microduck_rl`.
-
-Independently test missing checkout, SHA mismatch, missing environment, and nonzero pytest exit. None may trigger setup.
+Both use `cwd=.duck/upstream/microduck_rl`. Independently test absent checkout, SHA mismatch, absent environment, and nonzero pytest exit. None may trigger setup.
 
 - [ ] **Step 2: Implement readiness and CPU tiers**
 
-Before running pytest, require exact checkout SHA and verified Python 3.12 environment. A missing precondition reports FAIL with `./duck setup cpu` as the next action.
+Require exact SHA and verified Python 3.12 environment. A failed precondition returns FAIL with `./duck setup cpu` as the next action. Pytest exit `0` → PASS; nonzero → FAIL with exact exit code and log paths. Do not upgrade a nonzero process by parsing prose.
 
-Pytest exit `0` → PASS. Any nonzero → FAIL with exact exit code and stdout/stderr log paths. Do not parse pytest prose to upgrade a nonzero exit.
-
-- [ ] **Step 3: Add commands and verify**
+- [ ] **Step 3: Add commands, verify, commit**
 
 ```bash
+python -m pytest tests/test_cpu_tiers.py tests/test_cli.py -q
 ./duck test unit
 ./duck test smoke
-python -m pytest tests/test_cpu_tiers.py tests/test_cli.py -q
-```
-
-PASS establishes the pinned upstream CPU regression surface only.
-
-- [ ] **Step 4: Commit**
-
-```bash
 git add duck_harness tests
 git commit -m "feat: add upstream cpu test ladder"
 ```
+
+PASS establishes only the pinned upstream CPU regression surface.
 
 ---
 
@@ -548,22 +482,17 @@ git commit -m "feat: add upstream cpu test ladder"
 - Modify: `duck_harness/cli.py`
 - Create: `tests/test_sim_tier.py`
 
-**Interface:**
-
-```python
-def test_sim(paths: HarnessPaths, config: UpstreamConfig,
-             runner=run_logged) -> CommandOutcome: ...
-```
+**Callable contract:** `test_sim(paths, config, runner=run_logged) -> CommandOutcome` verifies readiness, runs the deterministic probe, parses its JSON, and records numeric evidence.
 
 - [ ] **Step 1: Write failing simulation tests**
 
-A passing fake stdout payload is:
+Passing fake stdout payload:
 
 ```json
 {"steps": 50, "initial_time": 0.0, "final_time": 0.1, "nq": 21, "nu": 14}
 ```
 
-Test separate failures for nonzero subprocess exit, invalid JSON, non-advancing time, steps other than 50, actuator count other than 14, SHA mismatch, and missing environment.
+Test separate failures for nonzero subprocess, invalid JSON, non-advancing time, steps other than 50, actuator count other than 14, SHA mismatch, and missing environment.
 
 - [ ] **Step 2: Create deterministic probe**
 
@@ -605,7 +534,7 @@ if __name__ == "__main__":
     raise SystemExit(main())
 ```
 
-- [ ] **Step 3: Implement harness validation**
+- [ ] **Step 3: Implement independent harness validation**
 
 Run:
 
@@ -613,18 +542,9 @@ Run:
 uv run --frozen python ABSOLUTE_DUCK_ROOT/scripts/probes/sim_step.py ABSOLUTE_UPSTREAM_ROOT/src/mjlab_microduck/robot/microduck/scene.xml
 ```
 
-Parse the final non-empty stdout line as JSON and independently require:
+Parse the final non-empty stdout line and require `returncode == 0`, `steps == 50`, `final_time > initial_time`, and `nu == 14`. Record the payload in receipt evidence.
 
-```text
-returncode == 0
-steps == 50
-final_time > initial_time
-nu == 14
-```
-
-Record the payload as receipt evidence.
-
-Claim boundary: PASS proves the pinned MicroDuck model loads and advances 50 CPU MuJoCo steps. It does not prove learned walking behavior.
+Claim boundary: PASS proves model load plus 50 CPU MuJoCo physics steps. It does not prove learned walking behavior.
 
 - [ ] **Step 4: Verify and commit**
 
@@ -644,13 +564,9 @@ git commit -m "feat: add headless microduck simulation witness"
 - Modify: `duck_harness/cli.py`
 - Create: `tests/test_train_tier.py`
 
-**Interfaces:**
-
-```python
-def parse_learning_iterations(text: str) -> list[tuple[int, int]]: ...
-def test_train_smoke(paths: HarnessPaths, config: UpstreamConfig,
-                     runner=run_logged) -> CommandOutcome: ...
-```
+**Callable contracts:**
+- `parse_learning_iterations(text) -> list[tuple[int, int]]` returns every integer pair matched by the pinned logger regex in order.
+- `test_train_smoke(paths, config, runner=run_logged) -> CommandOutcome` requires exact setup/GPU preconditions and records bounded progress evidence.
 
 - [ ] **Step 1: Write failing parser and command tests**
 
@@ -667,7 +583,7 @@ text = "\x1b[1m Learning iteration 0/5 \x1b[0m\n Learning iteration 4/5 "
 assert parse_learning_iterations(text) == [(0, 5), (4, 5)]
 ```
 
-Training tests independently cover: missing GPU, nonzero Torch CUDA probe, trainer nonzero, trainer exit `0` with no progress witness, and progress ending before `4/5`.
+Training tests independently cover missing GPU, nonzero Torch CUDA probe, trainer nonzero, trainer exit `0` with no progress witness, and progress stopping before `4/5`.
 
 - [ ] **Step 2: Implement exact preconditions and argv**
 
@@ -683,26 +599,22 @@ Bounded trainer:
 uv run --frozen train Mjlab-Velocity-Flat-MicroDuck --env.scene.num-envs 64 --agent.max_iterations 5 --agent.logger tensorboard
 ```
 
-PASS requires trainer exit `0` and parsed evidence containing total `5` with maximum observed iteration index at least `4`. Record all parsed iteration tuples.
+PASS requires trainer exit `0` and parsed evidence with total `5` and maximum iteration index at least `4`. Record all parsed pairs. Reward value is not an acceptance criterion.
 
-Do not use reward value as an acceptance criterion. A five-iteration run is a training-path witness, not a policy-quality or sim-to-real witness.
-
-- [ ] **Step 3: Verify unit logic**
+- [ ] **Step 3: Verify and commit**
 
 ```bash
 python -m pytest tests/test_train_tier.py tests/test_cli.py -q
 ```
 
-If a qualifying CUDA host exists:
+On a qualifying CUDA host:
 
 ```bash
 ./duck setup gpu
 ./duck test train-smoke
 ```
 
-If no qualifying CUDA host exists, the live GPU witness remains NOT RUN. Unit tests do not substitute for it.
-
-- [ ] **Step 4: Commit**
+If no qualifying CUDA host exists, the live witness remains NOT RUN; unit tests do not substitute for execution.
 
 ```bash
 git add duck_harness tests
@@ -722,16 +634,13 @@ git commit -m "feat: add bounded cuda training smoke test"
 - Create: `AGENTS.md`
 - Create: `tests/test_status.py`
 
-**Interfaces:**
-
-```python
-def latest_by_command(receipts: Sequence[dict[str, Any]]) -> dict[str, dict[str, Any]]: ...
-def status(paths: HarnessPaths, config: UpstreamConfig) -> CommandOutcome: ...
-```
+**Callable contracts:**
+- `latest_by_command(receipts) -> dict[str, dict[str, Any]]` selects the last valid receipt for each canonical command key.
+- `status(paths, config) -> CommandOutcome` reads receipt state only; successful parsing makes the status command itself PASS even when displayed rows remain UNKNOWN.
 
 - [ ] **Step 1: Write failing status tests**
 
-Canonical summary rows:
+Canonical rows:
 
 ```text
 doctor
@@ -743,27 +652,15 @@ test sim
 test train-smoke
 ```
 
-Tests prove:
+Prove: absent prior receipts display UNKNOWN for every row; latest receipt supersedes earlier same-row state; prior FAIL remains until superseded; malformed receipt makes status command FAIL; status invokes no probes/git/uv/MuJoCo/training.
 
-- absent prior receipts display UNKNOWN for every row;
-- latest valid receipt for a row supersedes earlier receipts;
-- prior FAIL remains visible until superseded by a later receipt for the same row;
-- malformed receipt makes the `status` command itself FAIL;
-- status does not call probes, git, uv, MuJoCo, or training.
-
-Distinguish two levels explicitly: the **summary rows** may be UNKNOWN while the **status command outcome** is PASS when the receipt store was parsed successfully. If receipt parsing fails, status command outcome is FAIL.
+Keep two levels distinct: summary rows may be UNKNOWN while status-command outcome is PASS if receipt parsing succeeded.
 
 - [ ] **Step 2: Implement status**
 
-Print:
+Print columns `COMMAND | STATUS | ENDED_AT | UPSTREAM`. Use `-` for missing time/SHA. Read and render prior receipts first, then persist status's own receipt. Never infer from `.venv`, checkout files, logs, checkpoints, or model artifacts.
 
-```text
-COMMAND | STATUS | ENDED_AT | UPSTREAM
-```
-
-Use `-` for absent timestamp/SHA. Read and render prior receipts first; then persist status's own required receipt. Never infer success from `.venv`, checkout files, logs, checkpoints, or model artifacts.
-
-- [ ] **Step 3: Rewrite README as the shortest path**
+- [ ] **Step 3: Rewrite README as shortest path**
 
 Lead with:
 
@@ -778,11 +675,11 @@ cd duck
 ./duck status
 ```
 
-State: Linux/WSL2 v1 target; Python 3.12 upstream requirement; native Windows/macOS UNKNOWN; CPU-safe tests can still install CUDA-bearing dependencies; CUDA training is separate via `setup gpu` and `test train-smoke`; no default command controls a physical robot.
+State Linux/WSL2 v1 target; Python 3.12 upstream requirement; native Windows/macOS UNKNOWN; CPU-safe tests can install CUDA-bearing dependencies; GPU training uses `setup gpu` then `test train-smoke`; no default command controls a physical robot.
 
 - [ ] **Step 4: Create TESTING.md**
 
-Every rung contains six fields: Prerequisites, Command, PASS witness, What PASS does not prove, Common failure classes, Next discriminating action.
+Every rung has exactly: Prerequisites; Command; PASS witness; What PASS does not prove; Common failure classes; Next discriminating action.
 
 Required claim table:
 
@@ -798,7 +695,7 @@ Required claim table:
 
 - [ ] **Step 5: Create AGENTS.md**
 
-Rules: read `upstream.json`; never move the pin implicitly; run cheapest discriminating witness first; preserve four status values; do not infer test success from artifacts; do not equate simulation/training with hardware; never run physical control from default tests; pin updates require harness tests plus CPU setup/unit/smoke/sim compatibility checks.
+Rules: read `upstream.json`; never move the pin implicitly; run cheapest discriminating witness first; preserve all four statuses; do not infer test success from artifacts; do not equate simulation/training with hardware; never run physical control from default tests; pin updates require harness tests plus CPU setup/unit/smoke/sim compatibility checks.
 
 - [ ] **Step 6: Verify and commit**
 
@@ -816,20 +713,18 @@ git commit -m "docs: make duck a guided testing ladder"
 **Files:**
 - Create: `.github/workflows/test.yml`
 - Modify: `tests/test_cli.py`
-- Modify: `README.md` only if a real execution witness reveals a concrete documentation mismatch
+- Modify: `README.md` only if real execution reveals a concrete documentation mismatch
 
-- [ ] **Step 1: Verify executable contract locally**
+- [ ] **Step 1: Verify executable contract**
 
 ```bash
 test -x duck
 ./duck --help
 ```
 
-Repair the tracked executable bit if either fails.
+Repair tracked executable mode if either fails.
 
 - [ ] **Step 2: Create two-job GitHub Actions workflow**
-
-`.github/workflows/test.yml`:
 
 ```yaml
 name: test
@@ -865,7 +760,7 @@ jobs:
       - run: ./duck test smoke
 ```
 
-`uv` is deliberately installed in **both** jobs because it is a required doctor probe. Do not add simulation or CUDA training to default CI.
+`uv` is installed in both jobs because doctor requires it. Do not add simulation or CUDA training to default CI.
 
 - [ ] **Step 3: Run complete harness tests**
 
@@ -873,7 +768,7 @@ jobs:
 python -m pytest -q
 ```
 
-- [ ] **Step 4: Execute the real CPU acceptance ladder on Linux/WSL2**
+- [ ] **Step 4: Execute real CPU acceptance on Linux/WSL2**
 
 ```bash
 ./duck doctor
@@ -884,16 +779,16 @@ python -m pytest -q
 ./duck status
 ```
 
-Inspect generated receipts. After setup, every command that observes the checkout must record exactly `29e887ecfbf5d37144759e5a9f8a176dfb83d547`; pre-checkout doctor may record null because no revision was observed.
+After setup, every command that observes upstream must record exactly `29e887ecfbf5d37144759e5a9f8a176dfb83d547`; pre-checkout doctor may record null.
 
-- [ ] **Step 5: Execute the GPU acceptance rung only with a real qualifying CUDA host**
+- [ ] **Step 5: Execute GPU acceptance only with a real qualifying CUDA host**
 
 ```bash
 ./duck setup gpu
 ./duck test train-smoke
 ```
 
-Live acceptance requires receipt iteration evidence through `4/5`. If the host is unavailable, implementation reporting must say NOT RUN.
+Live acceptance requires progress evidence through `4/5`. If unavailable, report NOT RUN.
 
 - [ ] **Step 6: Verify physical-control boundary**
 
@@ -905,7 +800,7 @@ Expected: no physical-control invocation in implementation/default-test paths.
 
 - [ ] **Step 7: Push and inspect CI**
 
-Both `harness` and `upstream-cpu` jobs must PASS. If upstream CPU CI fails, diagnose the exact log witness rather than weakening or skipping the check.
+Both `harness` and `upstream-cpu` jobs must PASS. Diagnose exact logs if either fails; do not weaken or skip checks merely to obtain green CI.
 
 - [ ] **Step 8: Final verification**
 
@@ -915,15 +810,7 @@ python -m pytest -q
 ./duck status
 ```
 
-Required final state:
-
-- tracked worktree clean after commits;
-- harness tests PASS;
-- `upstream.json` still contains the immutable pin;
-- default CI requires neither GPU nor robot hardware;
-- CPU ladder has real receipts;
-- a run simulation receipt contains advancing time and `nu=14`;
-- GPU execution state reflects actual execution, never inference.
+Required final state: clean tracked worktree; harness tests PASS; immutable pin unchanged; default CI has no GPU/hardware requirement; CPU ladder has real receipts; a simulation receipt, when executed, contains time advancement and `nu=14`; GPU state reflects actual execution rather than inference.
 
 - [ ] **Step 9: Commit**
 
@@ -936,16 +823,16 @@ git commit -m "ci: verify duck harness and upstream cpu tests"
 
 ## Plan self-review
 
-This plan is ready for execution only while all statements below remain true:
+Execution may begin only while all statements remain true:
 
-- Each approved command is mapped to implementation and tests.
+- Each approved command maps to implementation and tests.
 - Each design acceptance criterion has an executable witness.
-- The upstream authority is a SHA, not a moving branch.
+- Upstream authority is an immutable SHA, not a moving branch.
 - Linux, WSL2, native Windows, and macOS are not collapsed into one support claim.
-- CPU unit tests, CPU full suite, CPU dynamics, CUDA training, and physical validation remain distinct claims.
+- CPU focused tests, CPU full suite, CPU dynamics, CUDA training, and physical validation remain distinct claims.
 - `doctor` has no mutation beyond its receipt.
 - No test command performs hidden setup.
-- Status summary state is distinguished from status-command execution success.
-- The training parser is grounded in pinned `rsl-rl-lib==5.0.1` output.
-- The simulation witness does not require a learned policy.
+- Status summary state is distinct from status-command execution success.
+- Training progress parsing is grounded in pinned `rsl-rl-lib==5.0.1` output.
+- Simulation does not require a learned policy.
 - Missing live CUDA execution remains NOT RUN rather than PASS.
