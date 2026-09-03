@@ -41,12 +41,12 @@ Each rung must report what was actually checked. A failed or unavailable check r
 
 ### 1. Upstream authority boundary
 
-`duck/upstream.json` is the canonical local declaration of the external dependency. It contains:
+`upstream.json` at the repository root is the canonical local declaration of the external dependency. Its first implementation has exactly these authority fields:
 
-- repository: `pollen-robotics/microduck_rl`
-- git revision: an immutable commit SHA selected during implementation
-- expected default working branch for human reference
-- optional compatibility metadata required by the harness
+- `schema_version`
+- `repository`: `pollen-robotics/microduck_rl`
+- `revision`: an immutable commit SHA selected during implementation planning
+- `reference_branch`: the upstream branch from which that immutable revision was selected, retained for human reference only
 
 The harness clones or updates a disposable working copy under a gitignored directory such as `.duck/upstream/microduck_rl`. The working copy is derived state. The manifest is authority.
 
@@ -115,9 +115,11 @@ Each rung states prerequisites, exact command, expected PASS witness, common fai
 
 The harness fails early on mismatched upstream revisions, missing required executables, or incompatible Python/runtime prerequisites.
 
-Setup may install into an isolated project environment, but `doctor` remains read-only. Commands must print the failed precondition and the smallest next command that can resolve or further discriminate the failure.
+Setup may create an isolated project environment only inside `.duck/` or the disposable upstream checkout. The exact environment mechanism and path are implementation inputs to be selected only after verifying the pinned upstream tooling. `doctor` remains read-only.
 
-No cleanup command may delete paths outside `.duck/` or an explicitly created project environment. No test command may contact or control robot hardware implicitly.
+Commands must print the failed precondition and the smallest next command that can resolve or further discriminate the failure.
+
+No cleanup command may delete paths outside `.duck/` or the disposable upstream checkout. No test command may contact or control robot hardware implicitly.
 
 ## Testing strategy for `duck` itself
 
@@ -126,7 +128,7 @@ The harness has its own tests separate from upstream MicroDuck tests.
 1. **Static/contract tests:** manifest schema, command parsing, receipt schema, path confinement, and status aggregation.
 2. **Probe tests:** capability detection against synthetic PATH/environment fixtures so PASS/FAIL/UNKNOWN behavior is deterministic.
 3. **Subprocess tests:** fake upstream executables validate exit-code propagation and log capture without requiring CUDA or MuJoCo.
-4. **Integration smoke:** on a compatible host, fetch the pinned upstream revision and run the cheapest real CPU-safe upstream test set.
+4. **Integration smoke:** on a host meeting the documented prerequisites, fetch the pinned upstream revision and run the cheapest real CPU-safe upstream test set.
 5. **Simulation integration:** opt-in/local; verifies the selected viewer/inference process starts and advances rather than merely importing modules.
 6. **Training integration:** opt-in/GPU; bounded iteration count and environment count. Acceptance is successful initialization plus observed iteration advancement, not reward quality.
 7. **Hardware tests:** outside the first implementation and never part of default CI.
@@ -137,11 +139,11 @@ GitHub Actions initially runs only tests 1-4 when their prerequisites are verifi
 
 The first implementation is accepted when all of the following are true:
 
-- A fresh supported machine can clone `duck`, run `./duck doctor`, and receive an unambiguous capability report without mutation.
+- A fresh host meeting the implementation-documented prerequisites can clone `duck`, run `./duck doctor`, and receive an unambiguous capability report without mutation.
 - `./duck setup cpu` produces a pinned upstream checkout and isolated environment, or fails with a specific prerequisite witness.
 - `./duck test unit` and `./duck test smoke` execute real checks and emit receipts.
-- On a machine satisfying simulation prerequisites, `./duck test sim` proves that a MicroDuck simulation process starts and advances.
-- On a compatible CUDA GPU, `./duck test train-smoke` proves a bounded training run advances through initial iterations without claiming policy quality.
+- On a host satisfying the documented simulation prerequisites, `./duck test sim` proves that a MicroDuck simulation process starts and advances.
+- On a host satisfying the documented CUDA/GPU prerequisites, `./duck test train-smoke` proves a bounded training run advances through initial iterations without claiming policy quality.
 - `./duck status` reconstructs only observed prior results from receipts.
 - Default CI does not require a GPU or physical robot.
 - No default or test command can command, flash, or deploy to a physical robot.
@@ -165,6 +167,6 @@ Can make CUDA/system dependency reproduction stronger, but introduces container 
 
 Lowest implementation cost but cannot produce machine-readable receipts, enforce an immutable upstream revision, or distinguish observed test execution from user-reported state.
 
-## Non-claims
+## Non-claims and unresolved implementation inputs
 
-This design does not establish which host operating systems are supported, which exact upstream tests are CPU-safe, or which immutable upstream commit should be pinned. Those facts must be established from current upstream code during implementation planning and recorded as verified implementation inputs rather than assumed here.
+This design does not establish which host operating systems satisfy the harness prerequisites, which exact upstream tests are CPU-safe, which environment mechanism the pinned upstream revision requires, or which immutable upstream commit should be pinned. Those remain materially distinct unresolved inputs. They must be established from current upstream code during implementation planning and recorded as verified inputs rather than filled from assumption.
